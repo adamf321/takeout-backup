@@ -120,6 +120,35 @@ def run_rclone(*args: str, timeout: int = 3600) -> subprocess.CompletedProcess:
     )
 
 
+def run_rclone_streaming(*args: str, timeout: int = 3600) -> None:
+    """Run rclone, streaming stderr to the logger line-by-line in real time."""
+    import threading
+
+    cmd = ["rclone", "--config", RCLONE_CONF_PATH, *args]
+    log.info("Running: %s", " ".join(a if "token" not in a else "***" for a in cmd))
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+    def _stream() -> None:
+        for line in proc.stderr:
+            line = line.rstrip()
+            if line:
+                log.info("rclone: %s", line)
+
+    thread = threading.Thread(target=_stream, daemon=True)
+    thread.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        thread.join(timeout=5)
+        raise RuntimeError(f"rclone timed out after {timeout}s")
+    thread.join(timeout=30)
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"rclone copy failed with exit code {proc.returncode}")
+
+
 def list_drive_files() -> list[dict]:
     result = run_rclone("lsjson", GDRIVE_REMOTE, timeout=120)
     if result.returncode != 0:
@@ -148,13 +177,12 @@ def guard_against_partial_export(files: list[dict]) -> None:
 
 
 def sync_to_s3() -> None:
-    result = run_rclone(
+    run_rclone_streaming(
         "copy", GDRIVE_REMOTE, S3_REMOTE,
         "--checksum", "--transfers", "4", "--s3-upload-concurrency", "4",
+        "--stats", "60s", "--stats-one-line",
         timeout=int(os.environ.get("RCLONE_COPY_TIMEOUT", "18000")),  # 5h default
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"rclone copy failed: {result.stderr.strip()[-2000:]}")
 
 
 def verify_copy() -> None:
